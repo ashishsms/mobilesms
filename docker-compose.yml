@@ -1,0 +1,164 @@
+version: '3.9'
+
+services:
+  redis:
+    image: redis:alpine
+    restart: unless-stopped
+    healthcheck:
+      test: redis-cli ping | grep PONG
+    ports:
+      - 8001:8001
+      - 6379:6379
+    deploy:
+      resources:
+        limits:
+          cpus: '0.2'
+          memory: 128M
+    security_opt:
+      - no-new-privileges:true
+
+  rabbit-mq:
+    image: rabbitmq:3.10-management-alpine
+    restart: unless-stopped
+    healthcheck:
+      test: rabbitmq-diagnostics -q ping
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 525M
+    security_opt:
+      - no-new-privileges:true
+
+  jasmin:
+    build:
+      context: .
+      dockerfile: Dockerfile.jasmin
+    restart: unless-stopped
+    healthcheck:
+        test: ["CMD-SHELL", "wget -qO- http://localhost:1401 || exit 1"]
+        interval: 10s
+        timeout: 5s
+        retries: 5
+    ports:
+      - 2775:2775
+      - 8990:8990
+      - 1401:1401
+    volumes:
+      - jasmin_store:/etc/jasmin/store
+      - jasmin_logs:/var/log/jasmin
+      - jasmin_run:/var/run/jasmin
+      - ./jasmin-init.sh:/jasmin-init.sh
+    
+    depends_on:
+      redis:
+        condition: service_healthy
+      rabbit-mq:
+        condition: service_healthy
+    environment:
+      REDIS_CLIENT_HOST: redis
+      AMQP_BROKER_HOST: rabbit-mq
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 256M
+    security_opt:
+      - no-new-privileges:true 
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    env_file:
+      - ./backend/.env
+    restart: unless-stopped
+    depends_on:
+      rabbit-mq:
+        condition: service_healthy
+      jasmin:
+        condition: service_healthy
+      openldap:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:3000/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+  sms-worker:
+    build:
+      context: ./backend
+    command: node worker.js
+    env_file:
+      - ./backend/.env
+    depends_on:
+      rabbit-mq:
+        condition: service_healthy
+      jasmin:
+        condition: service_healthy
+      openldap:
+         condition: service_healthy
+    
+
+  frontend:
+    image: nginx:alpine
+    volumes:
+      - ./frontend:/usr/share/nginx/html:ro
+      - ./frontend/nginx.conf:/etc/nginx/nginx.conf:ro
+    ports:
+      - "8080:80"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    depends_on:
+      backend:
+        condition: service_healthy
+
+  openldap:
+    image: osixia/openldap:latest
+    container_name: openldap
+    hostname: openldap
+    ports: 
+      - "389:389"
+      - "636:636"
+    volumes:
+      - ./data/certificates:/container/service/slapd/assets/certs
+      - ./data/slapd/database:/var/lib/ldap
+      - ./data/slapd/config:/etc/ldap/slapd.d
+    environment: 
+      - LDAP_ORGANISATION=local
+      - LDAP_DOMAIN=local.com
+      - LDAP_ADMIN_USERNAME=admin
+      - LDAP_ADMIN_PASSWORD=admin_pass
+      - LDAP_CONFIG_PASSWORD=config_pass
+      - "LDAP_BASE_DN=dc=local,dc=com"      
+      - LDAP_READONLY_USER=true
+      - LDAP_READONLY_USER_USERNAME=user-ro
+      - LDAP_READONLY_USER_PASSWORD=ro_pass
+    healthcheck:
+      test: ["CMD", "ldapsearch", "-x", "-H", "ldap://localhost", "-b", "dc=local,dc=com"]
+      interval: 20s
+      timeout: 10s
+      retries: 5
+   
+  
+  phpldapadmin:
+    image: osixia/phpldapadmin:latest
+    container_name: phpldapadmin
+    hostname: phpldapadmin
+    ports: 
+      - "80:80"
+    environment: 
+      - PHPLDAPADMIN_LDAP_HOSTS=openldap
+      - PHPLDAPADMIN_HTTPS=false
+    depends_on:
+      - openldap
+
+volumes:
+  jasmin_store:
+  jasmin_logs:
+  jasmin_run:

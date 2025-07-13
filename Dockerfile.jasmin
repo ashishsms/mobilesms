@@ -1,0 +1,8 @@
+FROM jookies/jasmin:latest
+
+# Install telnet and other useful tools
+RUN apt-get update && \
+    apt-get install -y telnet net-tools iputils-ping && \
+     pip install --upgrade jcli && \
+    rm -rf /var/lib/apt/lists/*
+
